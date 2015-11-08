@@ -1,0 +1,1 @@
+Recognition of bow arrows in target, using OpenCV, myself-compiled for VS2015
