@@ -5,7 +5,8 @@
 using namespace std;
 using namespace cv;
 
-Mat src, src_gray, croped_src, src_hsv;
+Mat original_image, src_gray, croped_src, src_hsv;
+Rect targetROI;
 
 int a = 10;
 int b = 3;
@@ -37,13 +38,13 @@ Mat combineImages(vector<Mat> & images)
 
 vector<vector<Vec3f>> extractTargets(Mat image)
 {
-	cvtColor(src, src_hsv, CV_BGR2HSV);
+	cvtColor(image, src_hsv, CV_BGR2HSV);
 	vector<Mat> HSV;
 	split(src_hsv, HSV);
 	auto clahe = createCLAHE(3.0, Size(8, 8));
 	clahe->apply(HSV[2], HSV[2]);
 	merge(HSV, src_hsv);
-	cvtColor(src_hsv, src, CV_HSV2BGR);
+	cvtColor(src_hsv, image, CV_HSV2BGR);
 	//vector<Vec3f> circles = detectBlueCircles(src_hsv);
 	vector<Vec3f> redCircles = detectRedCircles(src_hsv);
 	vector<vector<Vec3f> > circles;
@@ -66,7 +67,9 @@ Mat cutTargets(Mat src, vector<vector<Vec3f> > targets)
 	int radius1 = cvRound(targets.back().front()[2]);
 	Point center2(cvRound(targets.back().back()[0]), cvRound(targets.back().back()[1]));
 	int radius2 = cvRound(targets.back().back()[2]);
-	Mat roi = Mat(src, Rect(center1.x - radius1, center1.y - radius1, radius1 * 2, center2.y - center1.y + 2 * radius1));
+	int border = 40;
+	targetROI = Rect(center1.x - radius1 - border, center1.y - radius1 - border, radius1 * 2 + border * 2, center2.y - center1.y + 2 * radius1 + border * 2);
+	Mat roi = Mat(src, targetROI);
 	//Mat mask = Mat::ones(image.size(), CV_8UC1);
 	roi.copyTo(src_croped_circle);
 	return src_croped_circle;
@@ -131,7 +134,7 @@ vector<Vec3f> detectRedCircles(Mat src) {
 	return circles;
 }
 
-vector<Vec3f> detectYellowCircles(Mat src) {
+vector<Vec3f> detectYellowCircles(Mat src)	 {
 	Mat src_red_1, src_red_2, src_blue, src_yellow, tmp;
 	inRange(src, Scalar(20, 80, 60), Scalar(40, 255, 255), src_blue);
 	cvtColor(src_hsv, tmp, CV_HSV2BGR);
@@ -164,8 +167,9 @@ Mat extractArrowsMask(Mat src)
 	vector<Mat> channels;
 	cvtColor(src, tmp, CV_BGR2HSV);
 	split(tmp, channels);
+	//equalizeHist(channels[2], channels[2]);
 	channels[2].copyTo(src_croped_circles_gray);
-	inRange(src_croped_circles_gray, 0, 80, src_croped_circles_gray);
+	inRange(src_croped_circles_gray, 0, 90, src_croped_circles_gray);
 	Mat element = getStructuringElement(MORPH_ELLIPSE, Size(3, 3));
 	morphologyEx(src_croped_circles_gray, src_croped_circles_gray, MORPH_OPEN, element, Point(-1, -1), 4);
 	vector<vector<Point>> contours;
@@ -174,38 +178,105 @@ Mat extractArrowsMask(Mat src)
 	sort(contours.begin(), contours.end(), [](vector<Point> a, vector<Point> b) {
 		return contourArea(a) > contourArea(b);
 	});
-	for (int j = 0; j < contours.size() && j < 8; j++)
+	for (int j = 0; j < contours.size() && contourArea(contours[j]) > 2000; j++)
 	{
 		drawContours(mask, contours, j, Scalar(255, 255, 255), -1);
 	}
 	return mask;
 }
 
+vector<Point> extractPoints(Mat src)
+{
+	Mat canny;
+	vector<Point> result;
+	//Mat element = getStructuringElement(MORPH_ELLIPSE, Size(5, 5));
+	//morphologyEx(src, canny, MORPH_OPEN, element, Point(-1, -1), 4);
+	GaussianBlur(src, canny, Size(), 2, 2);
+	Canny(canny, canny, 100, 200);
+	vector<Vec2f> lines;
+	HoughLines(canny, lines, 1, CV_PI / 180, 100);
+	sort(lines.begin(), lines.end(), [](Vec2f a, Vec2f b) {
+		return a[1] > b[1];
+	});
+	vector<vector<Point>> points(lines.size());
+	for (int i = 0; i < lines.size(); i++)
+	{
+		double r1 = lines[i][0];
+		double s1 = sin(lines[i][1]);
+		double c1 = cos(lines[i][1]);
+		for (int j = 0; j < canny.cols; ++j)
+		{
+			int y1 = (r1 - j * c1) / s1;
+			if (y1 < 0 || y1 >= canny.rows)
+				continue;
+			if (canny.at<unsigned char>(y1, j) == 255)
+			{
+				points[i].push_back(Point(j, y1));
+				circle(original_image(targetROI), Point(j, y1), 3, Scalar(0, 255, 0), 2);
+			}
+		}
+	}
+	for (size_t i = 0; i < lines.size(); i++)
+	{
+		float rho = lines[i][0], theta = lines[i][1];
+		Point pt1, pt2;
+		double a = cos(theta), b = sin(theta);
+		double x0 = a*rho, y0 = b*rho;
+		pt1.x = cvRound(x0 + 4000 * (-b));
+		pt1.y = cvRound(y0 + 4000 * (a));
+		pt2.x = cvRound(x0 - 4000 * (-b));
+		pt2.y = cvRound(y0 - 4000 * (a));
+		line(original_image(targetROI), pt1, pt2, Scalar(0, 0, 255), 1, CV_AA);
+	}
+	for (int i = 0; i < lines.size() - 1; i++)
+	{
+		for (int j = i + 1; j < lines.size(); j++)
+		{
+			double r1 = lines[i][0];
+			double r2 = lines[j][0];
+			double s1 = lines[i][1];
+			double s2 = lines[j][1];
+			double c1 = lines[i][1];
+			double c2 = lines[j][1];
+			int x0 = (r2 * s1 - r1 * s2) / (c2 * s1 - c1 * s2);
+			int y0 = (r1 - x0 * c1) / s1;
+			//circle(original_image(targetROI), Point(x, y), 5, Scalar(0, 255, 0), 3);
+			//circle(original_image(targetROI), points[i], 3, Scalar(0, 255, 0), 2);
+			//circle(original_image(targetROI), lines[j], 3, Scalar(0, 255, 0), 2);
+		} 
+	}
+	namedWindow("Points", WINDOW_NORMAL);
+	imshow("Points", original_image);
+	return result;
+}
+
 int main()
 {
-	src = imread("C:\\Projects\\Recognition\\Samples\\IMAG1069.jpg");
+	original_image = imread("C:\\Projects\\Recognition\\Samples\\IMAG1068.jpg");
 	Mat dst;
-	if (src.cols > src.rows)
+	if (original_image.cols > original_image.rows)
 	{
-		transpose(src, src);
-		flip(src, src, 1);
+		transpose(original_image, original_image);
+		flip(original_image, original_image, 1);
 	}
 	namedWindow("Original1", WINDOW_NORMAL);
 	//namedWindow("HSV", WINDOW_NORMAL);
-	vector<vector<Vec3f> > targets = extractTargets(src);
+	vector<vector<Vec3f> > targets = extractTargets(original_image);
+	imshow("Original1", original_image);
+	Mat src_croped_circle = cutTargets(original_image, targets);
+	Mat mask = extractArrowsMask(src_croped_circle);
+	vector<Point> marks = extractPoints(mask);
 	for (int i = 0; i < targets.size(); i++)
 		for (int j = 0; j < targets[i].size(); j++)
 		{
 			Point center1(cvRound(targets[i][j][0]), cvRound(targets[i][j][1]));
 			int radius1 = cvRound(targets[i][j][2]);
-			circle(src, center1, radius1, Scalar(0, 0, 255), 2);
+			circle(original_image, center1, radius1, Scalar(0, 0, 255), 2);
 		}
-	imshow("Original1", src);
-	/*Mat src_croped_circle = extractTargets(src);
-	Mat arrows;
-	src_croped_circle.copyTo(arrows, extractArrowsMask(src_croped_circle));
-	namedWindow("Test1", WINDOW_NORMAL);
-	imshow("Test1", arrows);*/
+	imshow("Points", original_image);
+	//src_croped_circle.copyTo(arrows, extractArrowsMask(src_croped_circle));
+	//namedWindow("Test1", WINDOW_NORMAL);
+	//imshow("Test1", arrows);
 	//namedWindow("Original", WINDOW_KEEPRATIO);
 	//imshow("Original", src);
 	waitKey(0);
